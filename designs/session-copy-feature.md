@@ -21,72 +21,129 @@ The session ID is already visible in the status line. Users should be able to us
 
 ## Session Storage Architecture
 
-### How Sessions Are Currently Stored
+### How Sessions Are Actually Stored
 
-Sessions are stored **centrally** in the user's config directory, not per-project:
+Sessions are stored in **per-project directories** under `~/.claude/projects/`:
 
 ```
 ~/.claude/
-├── sessions.db          # SQLite database with all sessions
-├── transcripts/
-│   ├── abc123.json      # Transcript for session abc123
-│   ├── def456.json      # Transcript for session def456
+├── projects/
+│   ├── -home-user-my-api/                    # Sessions for /home/user/my-api
+│   │   ├── d2971abf-8245-4887-9023-5f1e9bd03efd.jsonl   # Main session
+│   │   ├── agent-0dd7d674.jsonl              # Subagent transcript
+│   │   └── ...
+│   ├── -home-user-frontend/                  # Sessions for /home/user/frontend
+│   │   └── abc123-def456-....jsonl
 │   └── ...
 └── settings.json
 ```
 
-**Key point**: All sessions from all directories are already in the same database. They're just filtered by `cwd` when displayed.
+**Key points**:
+- Directory names are derived from the `cwd` path (slashes → dashes)
+- Session files are JSONL format (one JSON object per line)
+- Each line contains: `sessionId`, `cwd`, `gitBranch`, `message`, `timestamp`, etc.
+- Subagent transcripts are prefixed with `agent-`
 
-### Current Session Lookup (Filtered by CWD)
+### Session File Structure (JSONL)
+
+```jsonl
+{"sessionId":"d2971abf-...","cwd":"/home/user/my-api","gitBranch":"main","message":{"role":"user","content":"..."},"timestamp":"2025-..."}
+{"sessionId":"d2971abf-...","cwd":"/home/user/my-api","message":{"role":"assistant","content":[...]},"timestamp":"2025-..."}
+...
+```
+
+### Current Session Discovery
 
 ```typescript
-// Current implementation - filters by current directory
+// Current: only looks in the project directory for current cwd
 function getSessionsForResume(): Session[] {
-  const currentDir = process.cwd();
-  return db.sessions
-    .filter(s => s.cwd === currentDir)
+  const projectDir = cwdToProjectDir(process.cwd());  // /home/user/api → -home-user-api
+  const sessionFiles = glob(`${CLAUDE_DIR}/projects/${projectDir}/*.jsonl`);
+  return sessionFiles
+    .filter(f => !f.startsWith('agent-'))  // Exclude subagents
+    .map(parseSessionFile)
     .sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
 }
 ```
 
-### Proposed Session Lookup (Global Access)
+### Proposed: Cross-Workspace Session Discovery
 
 ```typescript
-// New implementation - can access all sessions
+// New: scan ALL project directories
 function getSessionsForResume(options: { all?: boolean } = {}): Session[] {
-  const currentDir = process.cwd();
+  const currentProjectDir = cwdToProjectDir(process.cwd());
 
-  let sessions = db.sessions.all();
+  let projectDirs: string[];
+  if (options.all) {
+    // Scan all workspace directories
+    projectDirs = glob(`${CLAUDE_DIR}/projects/*/`);
+  } else {
+    projectDirs = [`${CLAUDE_DIR}/projects/${currentProjectDir}`];
+  }
 
-  // Filter by cwd unless --all flag is used
-  if (!options.all) {
-    sessions = sessions.filter(s => s.cwd === currentDir);
+  const sessions: Session[] = [];
+  for (const dir of projectDirs) {
+    const files = glob(`${dir}/*.jsonl`).filter(f => !basename(f).startsWith('agent-'));
+    sessions.push(...files.map(parseSessionFile));
   }
 
   return sessions.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
 }
 
-// Lookup by ID always searches globally
+// Lookup by ID: search across all workspaces
 function getSessionById(id: string): Session | null {
-  return db.sessions.findById(id);  // No cwd filter
+  for (const projectDir of glob(`${CLAUDE_DIR}/projects/*/`)) {
+    const sessionFile = glob(`${projectDir}/${id}.jsonl`)[0]
+                     || glob(`${projectDir}/*.jsonl`).find(f => parseSessionId(f) === id);
+    if (sessionFile) {
+      return parseSessionFile(sessionFile);
+    }
+  }
+  return null;
 }
 ```
 
-### Why This Works
+### Copying a Session to Another Workspace
 
-1. **Sessions already exist globally** - The `~/.claude/sessions.db` contains ALL sessions
-2. **CWD is just metadata** - Each session has a `cwd` field, but it's not used for storage location
-3. **ID lookup is simple** - `--resume <id>` just needs to query by ID instead of filtering by cwd
-4. **No migration needed** - Existing sessions already have all the data needed
+To copy a session to the current directory:
+
+1. Find the source session file across all project directories
+2. Create the target project directory if needed
+3. Copy the JSONL file, updating `cwd` in each line
+4. Generate a new session ID for the copy (optional)
+
+```typescript
+function copySessionToCurrentDir(sourceSessionId: string): string {
+  const sourceFile = findSessionFile(sourceSessionId);
+  const targetDir = `${CLAUDE_DIR}/projects/${cwdToProjectDir(process.cwd())}`;
+  const newSessionId = generateUUID();
+
+  mkdirSync(targetDir, { recursive: true });
+
+  // Transform and copy
+  const lines = readFileSync(sourceFile, 'utf-8').split('\n');
+  const transformed = lines.map(line => {
+    if (!line.trim()) return line;
+    const obj = JSON.parse(line);
+    obj.cwd = process.cwd();
+    if (obj.sessionId) obj.sessionId = newSessionId;
+    return JSON.stringify(obj);
+  }).join('\n');
+
+  writeFileSync(`${targetDir}/${newSessionId}.jsonl`, transformed);
+  return newSessionId;
+}
+```
 
 ### Implementation Change Summary
 
 | Component | Current | Proposed |
 |-----------|---------|----------|
-| Storage location | `~/.claude/sessions.db` | Same (no change) |
-| `/resume` default | Filter by `cwd` | Same (no change) |
-| `/resume --all` | N/A | Show all sessions |
-| `--resume <id>` | Filter by `cwd` first | Direct ID lookup (global) |
+| Storage | `~/.claude/projects/<cwd-dir>/*.jsonl` | Same |
+| `/resume` default | Scan current project dir only | Same |
+| `/resume --all` | N/A | Scan ALL project directories |
+| `--resume <id>` | Look in current dir only | Search all directories |
+| Copy session | N/A | Copy JSONL + update cwd field |
 
 ## Proposed Design
 
