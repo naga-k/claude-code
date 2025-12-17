@@ -1,378 +1,355 @@
-# Feature Design: Copy Sessions Between Workspaces
+# Feature Design: Cross-Workspace Session Resume
 
 ## Overview
 
-This document describes the design for a feature that allows users to copy Claude Code sessions from one workspace/directory to another. This enables transferring conversation context, permissions, and history between different projects or directories.
+This document describes a feature that allows users to resume Claude Code sessions in a different workspace/directory than where they were originally created, while optionally preserving session permissions.
 
 ## Motivation
 
 ### Problem Statement
 
-Currently, Claude Code sessions are bound to specific working directories (`cwd`). Users cannot:
-- Move a session's context to a new project
-- Share conversation history between related projects
-- Duplicate a productive session to use as a starting point in another workspace
-- Transfer learned context (like project architecture understanding) to related codebases
+Currently, Claude Code sessions are bound to their original working directory (`cwd`). When you run `/resume` or `--resume`, you can only see and resume sessions that belong to your current directory. This creates friction when:
 
-### Use Cases
+- You want to continue a conversation in a different but related project
+- You're working in a monorepo and want to carry context between packages
+- You accidentally started a session in the wrong directory
+- You want to reuse permissions you've already granted in another session
 
-1. **Monorepo Navigation**: Copy a session from one package to another within a monorepo
-2. **Project Forking**: When forking a project, bring along the Claude session that understands the codebase
-3. **Context Transfer**: Apply learned context about an architecture to a similar project
-4. **Session Backup**: Create a copy of an important session in a different location
-5. **Team Sharing**: Export session context that teammates can import into their workspace
+### Key Insight
 
-## Existing Session Features
-
-| Feature | CLI Flag | REPL Command | Description |
-|---------|----------|--------------|-------------|
-| Resume | `--resume <name>` | `/resume <name>` | Resume a named session |
-| Continue | `--continue` | - | Resume most recent session |
-| Rename | - | `/rename <name>` | Name the current session |
-| Teleport | `--teleport` | - | Transfer session from web to CLI |
-| Export | - | `/export` | Export conversation for sharing |
+The session ID is already visible in the status line. Users should be able to use this ID to resume any session from any directory.
 
 ## Proposed Design
 
-### New Commands
+### Enhanced Resume Command
 
-#### CLI Flag: `--copy-session`
-
-```bash
-# Copy session to current directory
-claude --copy-session <session-name-or-id>
-
-# Copy session to a specific target directory
-claude --copy-session <session-name-or-id> --target /path/to/target
-
-# Copy from a specific source directory
-claude --copy-session <session-name-or-id> --source /path/to/source --target /path/to/target
-```
-
-#### REPL Command: `/copy-session`
-
-```
-/copy-session <session-name> [target-path]
-```
-
-Interactive mode with prompts:
-1. If no session name provided, show session picker (similar to `/resume`)
-2. If no target path provided, prompt for destination directory
-3. Confirm copy with preview of what will be transferred
-
-### Session Copy Behavior
-
-#### What Gets Copied
-
-| Component | Copied | Notes |
-|-----------|--------|-------|
-| Transcript history | Yes | Full conversation history |
-| Session name | Yes* | Appended with "-copy" or user-specified name |
-| Session ID | No | New ID generated for the copy |
-| Working directory (cwd) | Updated | Set to target directory |
-| Permissions | Optional | User can choose to copy or reset |
-| Git branch tracking | Reset | Cleared as target may have different git state |
-
-#### Copy Options
+#### CLI: `--resume` with Session ID
 
 ```bash
-# Copy with all permissions
-claude --copy-session my-session --target /new/project --copy-permissions
+# Current behavior: resume by name (only shows sessions from cwd)
+claude --resume my-session
 
-# Copy without permissions (fresh start, default)
-claude --copy-session my-session --target /new/project
+# New: resume by session ID from ANY directory
+claude --resume abc123
 
-# Copy and immediately start the session
-claude --copy-session my-session --target /new/project --start
+# New: resume by session ID and move session to current directory
+claude --resume abc123 --relocate
 
-# Copy with a new name
-claude --copy-session my-session --target /new/project --name "new-session-name"
+# New: resume and keep original permissions
+claude --resume abc123 --with-permissions
 ```
 
-### Data Structures
-
-#### Session Copy Request
-
-```typescript
-interface SessionCopyRequest {
-  sourceSessionId: string;
-  sourceWorkspace?: string;  // Optional, defaults to current
-  targetWorkspace: string;
-  options: SessionCopyOptions;
-}
-
-interface SessionCopyOptions {
-  newName?: string;           // Name for the copied session
-  copyPermissions: boolean;   // Whether to copy permission rules
-  startAfterCopy: boolean;    // Immediately start the copied session
-  transcriptOnly: boolean;    // Only copy transcript, reset all settings
-}
-```
-
-#### Session Copy Result
-
-```typescript
-interface SessionCopyResult {
-  success: boolean;
-  newSessionId: string;
-  newSessionName: string;
-  targetWorkspace: string;
-  copiedComponents: string[];  // List of what was copied
-  warnings: string[];          // Any warnings during copy
-}
-```
-
-### User Interface
-
-#### Interactive Mode Flow
+#### REPL: `/resume` Enhancements
 
 ```
-> /copy-session
+# Current: shows only sessions from current directory
+/resume
 
-Select a session to copy:
-┌─────────────────────────────────────────────────────────────┐
-│ Search: _                                                   │
-├─────────────────────────────────────────────────────────────┤
-│ ● my-api-project          /home/user/api          2h ago   │
-│   fix-auth-bug            /home/user/api          1d ago   │
-│   refactor-db             /home/user/backend      3d ago   │
-│   frontend-redesign       /home/user/frontend     1w ago   │
-└─────────────────────────────────────────────────────────────┘
-                                                    [P]review
+# New: show ALL sessions across all workspaces
+/resume --all
 
-Selected: my-api-project
+# New: resume specific session by ID
+/resume abc123
 
-Target directory: /home/user/new-api-project
-
-Copy options:
-  [x] Copy transcript history
-  [ ] Copy permissions (recommended: start fresh)
-  [ ] Start session after copy
-
-Confirm copy? [y/N]
-
-✓ Session copied successfully!
-  New session: my-api-project-copy
-  Location: /home/user/new-api-project
-
-  To start: cd /home/user/new-api-project && claude --resume my-api-project-copy
+# New: resume with permissions from that session
+/resume abc123 --with-permissions
 ```
 
-#### Keyboard Shortcuts (in session picker)
+### Behavior Options
+
+| Flag | Behavior |
+|------|----------|
+| `--resume <id>` | Resume session, update its cwd to current directory |
+| `--resume <id> --keep-cwd` | Resume session but keep original cwd (read-only context) |
+| `--resume <id> --with-permissions` | Resume and apply the session's saved permissions |
+| `--relocate` | Permanently change the session's home directory |
+
+### Session Resume Modes
+
+#### Mode 1: Resume in New Directory (Default)
+```bash
+cd /new/project
+claude --resume abc123
+```
+- Session resumes with conversation history intact
+- `cwd` updates to `/new/project`
+- Permissions reset (fresh start for new directory)
+- Session now "lives" in the new directory
+
+#### Mode 2: Resume with Permissions
+```bash
+cd /new/project
+claude --resume abc123 --with-permissions
+```
+- Same as above, but permissions carry over
+- Useful when projects have similar trust requirements
+- Warning shown if permissions reference paths from old cwd
+
+#### Mode 3: Peek at Session (Keep Original CWD)
+```bash
+cd /somewhere/else
+claude --resume abc123 --keep-cwd
+```
+- Resume session but operations still target original directory
+- Useful for reviewing/continuing work without relocating
+- Session stays associated with original workspace
+
+### Updated `/resume` UI
+
+```
+> /resume --all
+
+Sessions across all workspaces:
+┌──────────────────────────────────────────────────────────────────────┐
+│ Search: _                                          [A]ll workspaces  │
+├──────────────────────────────────────────────────────────────────────┤
+│ ID       Name              Directory                    Last Used    │
+├──────────────────────────────────────────────────────────────────────┤
+│ abc123   my-api-session    /home/user/api              2h ago       │
+│ def456   fix-auth-bug      /home/user/api              1d ago       │
+│ ghi789   refactor-db       /home/user/backend          3d ago    ←  │
+│ jkl012   frontend-work     /home/user/frontend         1w ago       │
+└──────────────────────────────────────────────────────────────────────┘
+                                    [P]review  [W]ith-permissions  [R]elocate
+
+Selected: ghi789 (from /home/user/backend)
+Current directory: /home/user/new-backend
+
+Resume options:
+  ● Resume here (move session to current directory)
+  ○ Resume with permissions
+  ○ Peek (keep original directory)
+
+[Enter] Confirm  [Esc] Cancel
+```
+
+### Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
-| Enter | Select session for copy |
+| A | Toggle all workspaces / current workspace only |
 | P | Preview session transcript |
-| / | Search/filter sessions |
+| W | Resume with permissions |
+| R | Relocate session to current directory |
+| Enter | Resume with selected options |
 | Esc | Cancel |
 
-### Implementation Architecture
+## Data Model Changes
+
+### Session Record
+
+```typescript
+interface Session {
+  id: string;
+  name?: string;
+  cwd: string;                    // Current working directory
+  originalCwd?: string;           // Track where session was created
+  transcript_path: string;
+  permissions: PermissionRule[];
+  createdAt: Date;
+  lastAccessedAt: Date;
+  relocated: boolean;             // Has session been moved?
+  relocationHistory?: string[];   // Track past cwds
+}
+```
+
+### Permission Portability
+
+```typescript
+interface PermissionRule {
+  tool: string;
+  pattern: string;
+  pathType: 'absolute' | 'relative' | 'any';  // New field
+}
+
+// When resuming with permissions:
+// - 'relative' paths: rebase to new cwd
+// - 'absolute' paths: keep as-is (with warning if inaccessible)
+// - 'any' patterns (like "*.ts"): transfer directly
+```
+
+## Implementation Details
+
+### Session Lookup Changes
+
+Current:
+```typescript
+function findSessions(cwd: string): Session[] {
+  return db.sessions.filter(s => s.cwd === cwd);
+}
+```
+
+New:
+```typescript
+function findSessions(options: { cwd?: string; all?: boolean }): Session[] {
+  if (options.all) {
+    return db.sessions.all();
+  }
+  return db.sessions.filter(s => s.cwd === options.cwd);
+}
+
+function findSessionById(id: string): Session | null {
+  return db.sessions.findById(id);
+}
+```
+
+### Resume Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     CLI Entry Point                         │
-│                  claude --copy-session                      │
+│                   claude --resume abc123                    │
 └─────────────────────┬───────────────────────────────────────┘
                       │
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                  Session Manager                            │
-│  - Validate source session exists                           │
-│  - Validate target directory                                │
-│  - Check for conflicts                                      │
+│              Session Lookup (by ID, global)                 │
+│  - Search all sessions, not just current cwd                │
+│  - Return session metadata                                  │
 └─────────────────────┬───────────────────────────────────────┘
                       │
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                  Session Copier                             │
-│  - Read source session data                                 │
-│  - Transform transcript paths                               │
-│  - Generate new session ID                                  │
-│  - Update cwd references                                    │
+│                  Permission Handling                        │
+│  - If --with-permissions: migrate permissions               │
+│  - Rebase relative paths to new cwd                         │
+│  - Warn about inaccessible absolute paths                   │
 └─────────────────────┬───────────────────────────────────────┘
                       │
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                  Storage Layer                              │
-│  - Write new session to target workspace storage            │
-│  - Copy transcript file                                     │
-│  - Index new session                                        │
+│                  Update Session CWD                         │
+│  - Set cwd to current directory (unless --keep-cwd)         │
+│  - Track in relocationHistory                               │
+│  - Update lastAccessedAt                                    │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  Resume Session                             │
+│  - Load transcript                                          │
+│  - Initialize with migrated permissions                     │
+│  - Start REPL                                               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Hook Integration
+## Permission Migration
 
-#### New Hook Event: `SessionCopy`
+### Example: Rebasing Permissions
 
+Original session in `/home/user/api`:
 ```json
 {
-  "SessionCopy": [
-    {
-      "matcher": "*",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "echo 'Session copied: $SESSION_SOURCE -> $SESSION_TARGET'"
-        }
-      ]
-    }
+  "permissions": [
+    { "tool": "Edit", "pattern": "src/**/*.ts", "pathType": "relative" },
+    { "tool": "Bash", "pattern": "npm test", "pathType": "any" },
+    { "tool": "Read", "pattern": "/etc/hosts", "pathType": "absolute" }
   ]
 }
 ```
 
-Hook input:
+After `--resume abc123 --with-permissions` in `/home/user/new-api`:
 ```json
 {
-  "session_id": "new-session-id",
-  "source_session_id": "original-session-id",
-  "source_cwd": "/original/path",
-  "target_cwd": "/new/path",
-  "hook_event_name": "SessionCopy"
+  "permissions": [
+    { "tool": "Edit", "pattern": "src/**/*.ts", "pathType": "relative" },  // Works in new cwd
+    { "tool": "Bash", "pattern": "npm test", "pathType": "any" },          // Transfers as-is
+    { "tool": "Read", "pattern": "/etc/hosts", "pathType": "absolute" }    // Kept (still valid)
+  ]
 }
 ```
 
-### Error Handling
+### Warning Messages
 
-| Error Condition | Behavior |
-|-----------------|----------|
-| Source session not found | Error with list of available sessions |
-| Target directory doesn't exist | Prompt to create or error |
-| Target has existing session with same name | Prompt to rename or overwrite |
-| Insufficient permissions on target | Clear error message |
-| Copy fails mid-process | Rollback, clean up partial copy |
+```
+⚠ Some permissions reference paths that may not exist in the new directory:
+  - Edit: "config/database.yml" (file not found)
 
-### Edge Cases
-
-1. **Circular copy**: Copying session back to its original workspace
-   - Allow with warning, create as new session
-
-2. **Cross-user copy**: Copying to a directory owned by different user
-   - Respect file system permissions, fail gracefully
-
-3. **Large transcripts**: Sessions with very large conversation history
-   - Stream copy for large files, show progress indicator
-
-4. **Active sessions**: Copying a session that's currently running
-   - Allow copy of snapshot, warn that new messages won't be included
-
-5. **Git state mismatch**: Target has different git branch/repo
-   - Clear git tracking info, let session adapt to new context
-
-## Alternative Designs Considered
-
-### Option A: Session Export/Import (File-based)
-
-```bash
-# Export to file
-claude --export-session my-session > session.json
-
-# Import in new directory
-cd /new/project && claude --import-session session.json
+Continue anyway? [y/N]
 ```
 
-**Pros**:
-- Simple, portable format
-- Easy to share via email/slack
-- Version controllable
+## Use Cases
 
-**Cons**:
-- Two-step process
-- File management overhead
-- Potential for stale exports
-
-### Option B: Session Linking (Symlink-style)
-
+### 1. Wrong Directory Start
 ```bash
-# Link session to additional directory
-claude --link-session my-session /new/project
+# Accidentally started in home directory
+cd ~
+claude
+# ... did a lot of work, granted permissions ...
+
+# Realize mistake, want to move to actual project
+cd ~/my-project
+claude --resume abc123 --with-permissions --relocate
 ```
 
-**Pros**:
-- No data duplication
-- Changes sync automatically
+### 2. Monorepo Package Hopping
+```bash
+# Working on backend
+cd ~/monorepo/packages/backend
+claude --resume backend-session
 
-**Cons**:
-- Complexity in managing linked sessions
-- Confusion about which workspace "owns" the session
-- Git tracking issues
+# Need to hop to frontend but keep context
+cd ~/monorepo/packages/frontend
+claude --resume backend-session  # Context preserved, permissions reset
+```
 
-### Option C: Session Clone with Smart Context (Chosen Approach)
+### 3. Reusing Permissions Template
+```bash
+# Have a session with all your preferred permissions
+cd ~/new-project
+claude --resume trusted-session --with-permissions
+# New project immediately has your permission setup
+```
 
-The proposed design creates an independent copy that can diverge, similar to git clone. This provides:
-- Clear ownership semantics
-- Independence between source and copy
-- Flexibility to adapt to new codebase
+## Error Handling
+
+| Situation | Behavior |
+|-----------|----------|
+| Session ID not found | "Session 'abc123' not found. Use `/resume --all` to see all sessions." |
+| Permission path invalid | Warning + prompt to continue |
+| Session currently active elsewhere | "Session is active in another terminal. Force resume? [y/N]" |
 
 ## Security Considerations
 
-1. **Permission Isolation**: By default, don't copy permissions to prevent accidental privilege escalation
-2. **Transcript Privacy**: Ensure copied transcripts don't leak sensitive info from source project
-3. **Path Sanitization**: Validate and sanitize all path inputs
-4. **Session Integrity**: Verify session data integrity after copy
+1. **Permission scope**: Warn when permissions from a different cwd might grant unintended access
+2. **Sensitive paths**: Flag absolute paths to sensitive locations (e.g., `~/.ssh`)
+3. **Audit trail**: Log when permissions are migrated between workspaces
 
 ## Implementation Phases
 
-### Phase 1: Core Copy Functionality
-- [ ] Implement `--copy-session` CLI flag
-- [ ] Basic session copy with transcript and metadata
-- [ ] Target directory validation
-- [ ] New session ID generation
+### Phase 1: Basic Cross-Workspace Resume
+- [ ] Enable `--resume <id>` to find sessions globally
+- [ ] Update session cwd on resume
+- [ ] Add `--all` flag to `/resume` command
 
-### Phase 2: Interactive Mode
-- [ ] Add `/copy-session` REPL command
-- [ ] Session picker UI
-- [ ] Copy options dialog
-- [ ] Progress indicator for large sessions
+### Phase 2: Permission Handling
+- [ ] Add `--with-permissions` flag
+- [ ] Implement permission path rebasing
+- [ ] Add warnings for invalid paths
 
-### Phase 3: Advanced Features
-- [ ] `SessionCopy` hook event
-- [ ] Permission copy option
-- [ ] Cross-workspace session search
-- [ ] Batch copy multiple sessions
+### Phase 3: UI Enhancements
+- [ ] Update `/resume` screen with all-workspaces view
+- [ ] Add keyboard shortcuts (A, W, R)
+- [ ] Show session origin directory
 
-### Phase 4: Polish
-- [ ] Session preview before copy
-- [ ] Undo/rollback capability
-- [ ] Session copy history tracking
-- [ ] Integration with VS Code extension
+### Phase 4: Advanced Options
+- [ ] Add `--keep-cwd` mode
+- [ ] Track relocation history
+- [ ] Add `--relocate` for permanent moves
 
-## Testing Strategy
+## Comparison: Copy vs Resume
 
-### Unit Tests
-- Session data transformation
-- Path rewriting
-- ID generation
-- Validation logic
+| Aspect | Copy (Original Design) | Resume (This Design) |
+|--------|------------------------|----------------------|
+| Creates new session | Yes | No |
+| Preserves session ID | No | Yes |
+| Duplicates transcript | Yes | No |
+| Complexity | Higher | Lower |
+| Use case | Branching/backup | Mobility |
 
-### Integration Tests
-- End-to-end copy flow
-- Cross-directory operations
-- Permission handling
-- Hook integration
-
-### Manual Testing Scenarios
-1. Copy named session to new project
-2. Copy session with large transcript
-3. Copy to non-existent directory (with creation prompt)
-4. Copy with permission transfer
-5. Interrupt copy mid-process
+This design is simpler and addresses the core need: **using sessions across directories**.
 
 ## Open Questions
 
-1. **Session Deduplication**: Should we detect and prevent duplicate copies?
-2. **Merge Support**: Should there be a way to merge sessions from different workspaces?
-3. **History Pruning**: Option to copy only recent N messages?
-4. **Selective Copy**: Copy only specific parts of a session (certain conversations)?
-
-## Appendix
-
-### Related Features
-- Session resume: `--resume`, `/resume`
-- Session teleport: `--teleport`
-- Session export: `/export`
-- Session forking (internal, via UI)
-
-### References
-- CHANGELOG.md - Session feature history
-- plugins/plugin-dev/skills/hook-development/SKILL.md - Hook system documentation
+1. Should there be a way to "bookmark" a session ID for easy access?
+2. Should sessions auto-detect if they've been resumed in a git-related directory?
+3. Limit on how many directories a session can be relocated to?
