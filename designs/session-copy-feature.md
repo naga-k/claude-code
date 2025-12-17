@@ -19,6 +19,75 @@ Currently, Claude Code sessions are bound to their original working directory (`
 
 The session ID is already visible in the status line. Users should be able to use this ID to resume any session from any directory.
 
+## Session Storage Architecture
+
+### How Sessions Are Currently Stored
+
+Sessions are stored **centrally** in the user's config directory, not per-project:
+
+```
+~/.claude/
+├── sessions.db          # SQLite database with all sessions
+├── transcripts/
+│   ├── abc123.json      # Transcript for session abc123
+│   ├── def456.json      # Transcript for session def456
+│   └── ...
+└── settings.json
+```
+
+**Key point**: All sessions from all directories are already in the same database. They're just filtered by `cwd` when displayed.
+
+### Current Session Lookup (Filtered by CWD)
+
+```typescript
+// Current implementation - filters by current directory
+function getSessionsForResume(): Session[] {
+  const currentDir = process.cwd();
+  return db.sessions
+    .filter(s => s.cwd === currentDir)
+    .sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
+}
+```
+
+### Proposed Session Lookup (Global Access)
+
+```typescript
+// New implementation - can access all sessions
+function getSessionsForResume(options: { all?: boolean } = {}): Session[] {
+  const currentDir = process.cwd();
+
+  let sessions = db.sessions.all();
+
+  // Filter by cwd unless --all flag is used
+  if (!options.all) {
+    sessions = sessions.filter(s => s.cwd === currentDir);
+  }
+
+  return sessions.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
+}
+
+// Lookup by ID always searches globally
+function getSessionById(id: string): Session | null {
+  return db.sessions.findById(id);  // No cwd filter
+}
+```
+
+### Why This Works
+
+1. **Sessions already exist globally** - The `~/.claude/sessions.db` contains ALL sessions
+2. **CWD is just metadata** - Each session has a `cwd` field, but it's not used for storage location
+3. **ID lookup is simple** - `--resume <id>` just needs to query by ID instead of filtering by cwd
+4. **No migration needed** - Existing sessions already have all the data needed
+
+### Implementation Change Summary
+
+| Component | Current | Proposed |
+|-----------|---------|----------|
+| Storage location | `~/.claude/sessions.db` | Same (no change) |
+| `/resume` default | Filter by `cwd` | Same (no change) |
+| `/resume --all` | N/A | Show all sessions |
+| `--resume <id>` | Filter by `cwd` first | Direct ID lookup (global) |
+
 ## Proposed Design
 
 ### Enhanced Resume Command
